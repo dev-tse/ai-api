@@ -5,6 +5,11 @@ import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from pydantic import BaseModel
+import sqlite3
+import json
+
+conn = sqlite3.connect('document_store.db', check_same_thread=False)
+cursor = conn.cursor()
 
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -15,6 +20,13 @@ app = FastAPI(title="AI Document API")
 class AskQuestion(BaseModel):
     question: str
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS documents (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               chunks TEXT,
+               filename TEXT
+               )
+""")
 
 # Храним документ в памяти
 document_store = {
@@ -44,6 +56,10 @@ async def upload(file: UploadFile = File(...)):
     document_store['text'] = decode_file
     document_store['chunks'] = split_into_chunks(decode_file)
     document_store['embeddings'] = model.encode(document_store['chunks'])
+    chunks_json = json.dumps(document_store['chunks'], ensure_ascii=False)
+    cursor.execute('INSERT INTO documents (chunks,filename) VALUES(?, ?)', (chunks_json, document_store['filename']))
+    conn.commit()
+
     return {
         "message": "Файл загружен",
         "filename": file.filename,
@@ -95,7 +111,12 @@ def ask(request: AskQuestion):
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}]
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+        cursor.execute("SELECT * FROM documents")
+        rows = cursor.fetchall()
+        print(rows)
+        
+        return answer
     
 @app.delete("/reset")
 def reset():
@@ -103,4 +124,11 @@ def reset():
     document_store['text'] = None
     document_store['chunks'] = []
     document_store['embeddings'] = []
+    cursor.execute('DELETE from documents')
+    conn.commit()
+
     return {'message': 'Документ очищен'}
+
+@app.on_event("shutdown")
+def shutdown():
+    conn.close()
